@@ -1,496 +1,347 @@
 # Date: 8/25/23
 import threading
 import tkinter as tk
-import RPi.GPIO as GPIO
-from tkinter import scrolledtext, messagebox
+from tkinter import scrolledtext, messagebox, filedialog
 import random
-
-# Define GPIO pines for socket # 1
-socket1_good = 26
-socket1_bad = 20
-socket1_retest = 21
-socket1_recover = 19
-# Define GPIO pines for socket # 2
-socket2_good = 13
-socket2_bad = 16
-socket2_retest = 6
-socket2_recover = 12
-
-# Output pins to inform current testing PCB number (1, 2, 3 or 4)
-START_PCB_ONE = 9
-START_PCB_TWO = 10
-
-# Input start testing signal, expects 3.3 volts to activate, signal send from P&P and Read by Raspberry Pi.
-START_TESTING = 11
-
-# Output testing completed signal
-TESTING_COMPLETED = 5
-
-# Name Dictionary
-names = {26: "Pass", 20: "Bad", 21: "Retest", 19: "Recover", 13: "Pass", 16: "Bad", 6: "Retest", 12: "Recover"}
-TEST_SOCKET_1 = [socket1_good, socket1_bad, socket1_retest, socket1_recover]
-TEST_SOCKET_2 = [socket2_good, socket2_bad, socket2_retest, socket2_recover]
-selected_pcb_name_list = []  # Will append selected PCB from checked box
-TEST_COMPLETION_COUNT = 0
-TIME_DELAY_6_SECONDS = 2 * 1000  # This would equal 6 seconds
-
-# set up gpio pins
-GPIO.setwarnings(False)
-GPIO.setmode(GPIO.BCM)
-
-# Set the Input pins
-GPIO.setup(START_TESTING, GPIO.IN, pull_up_down=GPIO.PUD_DOWN)  # Setting the input pin with a pull-down resistor
+try:
+    import RPi.GPIO as GPIO
+except (RuntimeError, ModuleNotFoundError):
+    # Use a mock GPIO library for development on non-Raspberry Pi systems
+    import atexit
+    from unittest.mock import MagicMock
+    GPIO = MagicMock()
+    atexit.register(GPIO.cleanup)
 
 
-# Set up the Output pins
-def clean_up_pcb():
-    # 8 Channel relay board activates all channels when powered on, this will power them off.
-    GPIO.setup(socket1_good, GPIO.OUT)
-    GPIO.setup(socket1_bad, GPIO.OUT)
-    GPIO.setup(socket1_retest, GPIO.OUT)
-    GPIO.setup(socket1_recover, GPIO.OUT)
-    GPIO.setup(socket2_good, GPIO.OUT)
-    GPIO.setup(socket2_bad, GPIO.OUT)
-    GPIO.setup(socket2_retest, GPIO.OUT)
-    GPIO.setup(socket2_recover, GPIO.OUT)
-    GPIO.setup(START_PCB_ONE, GPIO.OUT)
-    GPIO.setup(START_PCB_TWO, GPIO.OUT)
-    GPIO.setup(TESTING_COMPLETED, GPIO.OUT)
-    print("Clean UP PCB")
+class AsicSimulator:
+    def __init__(self, root):
+        self.root = root
+        self.root.title("IC Tester.")
+        self.root.config(bg="#080202")
+        self.root.geometry("780x830")
 
+        # GPIO Pin Definitions
+        self.socket1_good = 26
+        self.socket1_bad = 20
+        self.socket1_retest = 21
+        self.socket1_recover = 19
+        self.socket2_good = 13
+        self.socket2_bad = 16
+        self.socket2_retest = 6
+        self.socket2_recover = 12
+        self.START_PCB_ONE = 9
+        self.START_PCB_TWO = 10
+        self.START_TESTING = 11
+        self.TESTING_COMPLETED = 5
 
-clean_up_pcb()
+        # Test Sockets
+        self.TEST_SOCKET_1 = [self.socket1_good, self.socket1_bad, self.socket1_retest, self.socket1_recover]
+        self.TEST_SOCKET_2 = [self.socket2_good, self.socket2_bad, self.socket2_retest, self.socket2_recover]
 
+        # Name Dictionary
+        self.names = {
+            self.socket1_good: "Pass", self.socket1_bad: "Bad", self.socket1_retest: "Retest", self.socket1_recover: "Recover",
+            self.socket2_good: "Pass", self.socket2_bad: "Bad", self.socket2_retest: "Retest", self.socket2_recover: "Recover"
+        }
 
-def extract_and_sort_numbers(combination_list):
-    numbers = []
-    for item in combination_list:
-        # Extract numbers from the string using a list comprehension and join to form the full number
-        number_str = ''.join([char for char in item if char.isdigit()])
-        if number_str:  # If a number is found
-            numbers.append(int(number_str))
-    return sorted(numbers)
+        # Application State
+        self.selected_pcb_name_list = []
+        self.test_completion_count = 0
+        self.running = False
 
+        # Constants
+        self.TIME_DELAY_2_SECONDS = 2 * 1000
+        self.ROOT_COLOR = "#080202"
+        self.BOX_COLOR = "#EEEEEE"
+        self.PCB_BUTTON_COLOR = "#176B87"
 
-def checked_boxes():
-    """PCB 1 to 4 are boolean variable set to false but if button PCB 1 is checked it will change to True
-       when clicking on start test button, it will run signal start function that will immediately call this function
-        will check the 4 buttons for boolem and append only True to global PCB Activation list and return list"""
-    global selected_pcb_name_list  # empty list.
-    pcb_checkbox = [pcb1.get(), pcb2.get(), pcb3.get(), pcb4.get()]  # Sample if 2 & 4: [False, True, False, True]
-    for _ in pcb_checkbox:
-        if pcb_checkbox[0] and "PCB 1" not in selected_pcb_name_list:
-            selected_pcb_name_list.append("PCB 1")
-            pcb1.set(True)
-        elif pcb_checkbox[1] and "PCB 2" not in selected_pcb_name_list:
-            selected_pcb_name_list.append("PCB 2")
-            pcb2.set(True)
-        elif pcb_checkbox[2] and "PCB 3" not in selected_pcb_name_list:
-            selected_pcb_name_list.append("PCB 3")
-            pcb3.set(True)  # removes check marks from box #3
-        elif pcb_checkbox[3] and "PCB 4" not in selected_pcb_name_list:
-            selected_pcb_name_list.append("PCB 4")
-            pcb4.set(True)  # removes check marks from box #4
-    sorted_list = extract_and_sort_numbers(selected_pcb_name_list)
-    return sorted_list  # Sample if selected checkbox 2 and 4: [2, 4]
+        # UI Variables
+        self.pcb_vars = {f"PCB {i+1}": tk.BooleanVar(value=False) for i in range(4)}
 
+        self.setup_gpio()
+        self.create_widgets()
 
-def status_display(new_msg):
-    status_output_text_box.delete(1.0, tk.END)  # Clear the ScrolledText content
-    status_output_text_box.insert(tk.END, new_msg, "center")  # Insert the new message
-    status_output_text_box.update()
+        self.status_display("Select PCB\nto\nStart Test")
 
+    def setup_gpio(self):
+        GPIO.setwarnings(False)
+        GPIO.setmode(GPIO.BCM)
+        GPIO.setup(self.START_TESTING, GPIO.IN, pull_up_down=GPIO.PUD_DOWN)
+        self.cleanup_pins()
 
-def signal_start():
-    global TEST_COMPLETION_COUNT  # Starts with int = 0
-    global selected_pcb_name_list  # PCB_X selection from checked box
-    checked_boxes()  # start check_box function to determine PCB selection
-    counter_for_test_only = 0  # counter only for testing
-    while True:
-        status_display(f"Waiting\nfor\nP&P!\n\n{counter_for_test_only}")
-        counter_for_test_only += 1
-        root.after(1000)
-        if GPIO.input(START_TESTING) == GPIO.LOW and len(selected_pcb_name_list) >= 1:
-            # if counter_for_test_only == 2 and len(selected_pcb_name_list) >= 1:
-            status_display(f"Testing\nIn\nProgress")
-            root.after(1000)
-            automate_handshake_threading()
-            break
-        if len(selected_pcb_name_list) == 0:
+    def cleanup_pins(self):
+        pins = [
+            *self.TEST_SOCKET_1,
+            *self.TEST_SOCKET_2,
+            self.START_PCB_ONE,
+            self.START_PCB_TWO,
+            self.TESTING_COMPLETED
+        ]
+        for pin in pins:
+            GPIO.setup(pin, GPIO.OUT)
+        print("Cleaned Up Pins")
+
+    def create_widgets(self):
+        # Main Title
+        title_label = tk.Label(self.root, text="ASIC Simulator V-2.5", font=("SimSun", 32, "bold"), bg=self.ROOT_COLOR, fg="white")
+        title_label.pack(pady=20)
+
+        # Main Frame
+        main_frame = tk.Frame(self.root, bg=self.ROOT_COLOR)
+        main_frame.pack(fill=tk.BOTH, expand=True, padx=10, pady=10)
+
+        # Left, Middle, and Right Frames
+        left_frame = tk.Frame(main_frame, bg=self.ROOT_COLOR)
+        left_frame.pack(side=tk.LEFT, fill=tk.BOTH, expand=True, padx=5)
+        middle_frame = tk.Frame(main_frame, bg=self.ROOT_COLOR)
+        middle_frame.pack(side=tk.LEFT, fill=tk.BOTH, expand=True, padx=5)
+        right_frame = tk.Frame(main_frame, bg=self.ROOT_COLOR)
+        right_frame.pack(side=tk.LEFT, fill=tk.BOTH, expand=True, padx=5)
+
+        # PCB Box Selector
+        self.create_pcb_selector_box(left_frame)
+
+        # Middle Box Display
+        self.create_status_display_box(middle_frame)
+
+        # Right Box Presser
+        self.create_manual_testing_box(right_frame)
+
+        # Main Output Text Box
+        self.main_output_text_box = scrolledtext.ScrolledText(self.root, padx=10, background=self.BOX_COLOR, font=("arial", 14, "bold"),
+                                                              height=14, width=50, borderwidth=2, relief=tk.SOLID)
+        self.main_output_text_box.tag_configure('center', justify='center')
+        self.main_output_text_box.pack(pady=10, fill=tk.BOTH, expand=True)
+
+        # Button Frame
+        button_frame = tk.Frame(self.root, bg=self.ROOT_COLOR)
+        button_frame.pack(pady=10)
+
+        # Save Log Button
+        save_log_button = tk.Button(button_frame, text="Save Log", width=14, height=2, command=self.save_log, bg="#64CCC5")
+        save_log_button.pack(side=tk.LEFT, padx=5)
+
+        # Stop Button
+        self.stop_button = tk.Button(button_frame, text="Stop", width=14, height=2, command=self.stop_test, bg="orange", state=tk.DISABLED)
+        self.stop_button.pack(side=tk.LEFT, padx=5)
+
+        # Exit Button
+        button_exit = tk.Button(button_frame, text="Exit", width=14, height=2, command=self.destroy, bg="gray")
+        button_exit.pack(side=tk.LEFT, padx=5)
+
+    def create_pcb_selector_box(self, parent_frame):
+        outer_frame = tk.Frame(parent_frame, bg=self.BOX_COLOR)
+        outer_frame.pack(fill=tk.BOTH, expand=True)
+        inner_frame = tk.Frame(outer_frame, bg=self.PCB_BUTTON_COLOR, bd=2, relief='solid')
+        inner_frame.pack(fill=tk.BOTH, expand=True, padx=2, pady=2)
+
+        label = tk.Label(inner_frame, text="Select PCB\n&\nStart Handshake", font=("SimSun", 11, "bold"), bg=self.PCB_BUTTON_COLOR, fg="white")
+        label.pack(pady=5)
+
+        for name, var in self.pcb_vars.items():
+            cb = tk.Checkbutton(inner_frame, text=name, width=8, height=2, variable=var, bg=self.PCB_BUTTON_COLOR)
+            cb.pack(pady=2)
+
+        self.start_button = tk.Button(inner_frame, text="Start Loop", width=16, height=2, command=self.start_signal_thread, bg="#64CCC5")
+        self.start_button.pack(pady=10)
+
+    def create_status_display_box(self, parent_frame):
+        outer_frame = tk.Frame(parent_frame, bg=self.BOX_COLOR)
+        outer_frame.pack(fill=tk.BOTH, expand=True)
+        inner_frame = tk.Frame(outer_frame, bg=self.PCB_BUTTON_COLOR, bd=2, relief='solid')
+        inner_frame.pack(fill=tk.BOTH, expand=True, padx=2, pady=2)
+
+        label = tk.Label(inner_frame, text="Current Test\nStatus", font=("SimSun", 11, "bold"), bg=self.PCB_BUTTON_COLOR, fg="white")
+        label.pack(pady=5)
+
+        self.status_output_text_box = scrolledtext.ScrolledText(inner_frame, background=self.BOX_COLOR, font=("arial", 14, "bold"), height=6,
+                                                                width=11, borderwidth=2, relief=tk.SOLID)
+        self.status_output_text_box.tag_configure('center', justify='center', foreground="red")
+        self.status_output_text_box.pack(pady=5, padx=5, fill=tk.BOTH, expand=True)
+
+    def create_manual_testing_box(self, parent_frame):
+        outer_frame = tk.Frame(parent_frame, bg=self.BOX_COLOR)
+        outer_frame.pack(fill=tk.BOTH, expand=True)
+        inner_frame = tk.Frame(outer_frame, bg=self.PCB_BUTTON_COLOR, bd=2, relief='solid')
+        inner_frame.pack(fill=tk.BOTH, expand=True, padx=2, pady=2)
+
+        label = tk.Label(inner_frame, text="Manual\nTesting", font=("SimSun", 11, "bold"), bg=self.PCB_BUTTON_COLOR, fg="white")
+        label.pack(pady=5)
+
+        tests = {
+            "All Passed": ("good", "green"),
+            "All Failed": ("bad", "red"),
+            "Retest All": ("retest", "#79AC78"),
+            "Recover All": ("recover", "#FF9B50"),
+            "Randomize": ("random", "#F8FF95")
+        }
+
+        for text, (test_type, color) in tests.items():
+            button = tk.Button(inner_frame, text=text, width=10, height=1, command=lambda t=test_type: self.run_manual_test_thread(t), bg=color)
+            button.pack(pady=5)
+
+    def status_display(self, new_msg):
+        self.status_output_text_box.delete(1.0, tk.END)
+        self.status_output_text_box.insert(tk.END, new_msg, "center")
+        self.status_output_text_box.update()
+
+    def get_checked_pcbs(self):
+        return [name for name, var in self.pcb_vars.items() if var.get()]
+
+    def signal_start(self):
+        self.selected_pcb_name_list = self.get_checked_pcbs()
+        if not self.selected_pcb_name_list:
             messagebox.showwarning("Warning!", "Must select at least one PCB")
-            break
+            return
 
+        self.running = True
+        self.start_button.config(state=tk.DISABLED)
+        self.stop_button.config(state=tk.NORMAL)
 
-def automate_handshake():
-    global TEST_SOCKET_1
-    global TEST_SOCKET_2
-    global selected_pcb_name_list
-    global TEST_COMPLETION_COUNT
-    global status_title_label
-    if TEST_COMPLETION_COUNT == 0:
-        TEST_COMPLETION_COUNT += 1
-    else:
-        TEST_COMPLETION_COUNT += 1
-    random.shuffle(TEST_SOCKET_1)  # Shuffle PCB_1_list & PCB_2_list
-    random.shuffle(TEST_SOCKET_2)
-    main_output_text_box.insert(tk.END, f"Test Number: {TEST_COMPLETION_COUNT}\n\n", "center")
-    main_output_text_box.update()
-    try:
-        while True:
-            for item in range(len(selected_pcb_name_list)):
-                if selected_pcb_name_list[item] == "PCB 1":
-                    # PCB 1 Go.
-                    pin_one = TEST_SOCKET_1[random.randint(0, 3)]  # select random test result for socket 1
-                    pin_two = TEST_SOCKET_2[random.randint(0, 3)]  # select random test result for socket 2
-                    GPIO.output(pin_one, GPIO.LOW)  # outputs test results to socket 1 by sending 5 volts to IO port
-                    GPIO.output(pin_two, GPIO.LOW)  # outputs test results to socket 2 by sending 5 volts to IO port
-                    main_output_text_box.insert(tk.END, f"PCB 1:\nSocket 1 Test: {names[pin_one]}\n")
-                    main_output_text_box.insert(tk.END, f"Socket 2 Test: {names[pin_two]}\n\n")
-                    main_output_text_box.update()
-                    root.after(TIME_DELAY_6_SECONDS)
-                    GPIO.output(pin_two, GPIO.HIGH)  # OFF
-                    GPIO.output(pin_one, GPIO.HIGH)  # OFF
-                    root.after(TIME_DELAY_6_SECONDS)
-                    selected_pcb_name_list.pop(0)
-                    break
-                    # PCB 2 Go.
-                elif selected_pcb_name_list[item] == "PCB 2":
-                    pin_one = TEST_SOCKET_1[random.randint(0, 3)]  # select random test result for socket 1
-                    pin_two = TEST_SOCKET_2[random.randint(0, 3)]  # select random test result for socket 2
-                    GPIO.output(pin_one, GPIO.LOW)  # outputs test results to socket 1 by sending 5 volts to IO port
-                    GPIO.output(pin_two, GPIO.LOW)  # outputs test results to socket 2 by sending 5 volts to IO port
-                    main_output_text_box.insert(tk.END, f"PCB 2:\nSocket 1 Test: {names[pin_one]}\n")
-                    main_output_text_box.insert(tk.END, f"Socket 2 Test: {names[pin_two]}\n\n")
-                    main_output_text_box.update()
-                    root.after(TIME_DELAY_6_SECONDS)
-                    GPIO.output(pin_two, GPIO.HIGH)  # OFF
-                    GPIO.output(pin_one, GPIO.HIGH)  # OFF
-                    root.after(TIME_DELAY_6_SECONDS)
-                    selected_pcb_name_list.pop(0)
-                    break
-
-                    # PCB 3 Go.
-                elif selected_pcb_name_list[item] == "PCB 3":
-                    pin_one = TEST_SOCKET_1[random.randint(0, 3)]  # select random test result for socket 1
-                    pin_two = TEST_SOCKET_2[random.randint(0, 3)]  # select random test result for socket 2
-                    # outputs test results to socket 1 by sending 5 volts to IO port
-                    GPIO.output(pin_one, GPIO.LOW)  # outputs test results to socket 1 by sending 5 volts to IO port
-                    GPIO.output(pin_two, GPIO.LOW)  # outputs test results to socket 2 by sending 5 volts to IO port
-                    main_output_text_box.insert(tk.END, f"PCB 3:\nSocket 1 Test: {names[pin_one]}\n")
-                    main_output_text_box.insert(tk.END, f"Socket 2 Test: {names[pin_two]}\n\n")
-                    main_output_text_box.update()
-                    root.after(TIME_DELAY_6_SECONDS)
-                    GPIO.output(pin_two, GPIO.HIGH)  # OFF
-                    GPIO.output(pin_one, GPIO.HIGH)  # OFF
-                    root.after(TIME_DELAY_6_SECONDS)
-                    selected_pcb_name_list.pop(0)
-                    break
-
-                # PCB 4 Go.
-                elif selected_pcb_name_list[item] == "PCB 4":
-                    pin_one = TEST_SOCKET_1[random.randint(0, 3)]  # select random test result for socket 1
-                    pin_two = TEST_SOCKET_2[random.randint(0, 3)]  # select random test result for socket 2
-                    GPIO.output(pin_one, GPIO.LOW)  # outputs test results to socket 1 by sending 5 volts to IO port
-                    GPIO.output(pin_two, GPIO.LOW)  # outputs test results to socket 2 by sending 5 volts to IO port
-                    main_output_text_box.insert(tk.END, f"PCB 4:\nSocket 1 Test: {names[pin_one]}\n")
-                    main_output_text_box.insert(tk.END, f"Socket 2 Test: {names[pin_two]}\n\n")
-                    main_output_text_box.update()
-                    root.after(TIME_DELAY_6_SECONDS)
-                    GPIO.output(pin_two, GPIO.HIGH)  # OFF
-                    GPIO.output(pin_one, GPIO.HIGH)  # OFF
-                    root.after(TIME_DELAY_6_SECONDS)
-                    selected_pcb_name_list.pop(0)
-                    break
-            if len(selected_pcb_name_list) < 1:
+        counter = 0
+        while self.running:
+            self.status_display(f"Waiting\nfor\nP&P!\n\n{counter}")
+            counter += 1
+            self.root.update()
+            self.root.after(1000)
+            if GPIO.input(self.START_TESTING) == GPIO.LOW:
+                self.status_display("Testing\nIn\nProgress")
+                self.root.update()
+                self.root.after(1000)
+                self.start_automate_handshake_thread()
                 break
-        message = f"\n------------------------------------------------------------------------------------\n" \
-                  f"                      Test {TEST_COMPLETION_COUNT} Has been completed                    " \
-                  f"\n------------------------------------------------------------------------------------\n\n"
-        main_output_text_box.insert(tk.END, message, "center")
-        root.after(1000)
-        main_output_text_box.update()
-        status_display(f"Test {TEST_COMPLETION_COUNT}\ncompleted")
-        status_output_text_box.update()
-        signal_start_threading()
-    except TypeError:
-        print("I'm inside the except block")
-    finally:
-        print(f"I'm inside the finally block")
 
+    def automate_handshake(self):
+        if not self.running:
+            return
 
-def start_all_good():
-    global TEST_COMPLETION_COUNT
-    pcb_number_dic = {"PCB 1": 1, "PCB 2": 2, "PCB 3": 3, "PCB 4": 4}
-    TEST_COMPLETION_COUNT += 1
-    selected_pcb = checked_boxes()
-    test_count = 0
-    status_display(f"Waiting\nfor\nP&P!")
-    while True:
-        test_count += 1
-        root.after(1000)
-        # if GPIO.input(START_TESTING) == GPIO.LOW and len(PCB_ACTIVATION) >= 1:
-        if test_count == 5 and len(selected_pcb) >= 1:
-            status_display(f"Testing\nIn\nProgress")
-            break
-    main_output_text_box.insert(tk.END, f"Current Test Number: {TEST_COMPLETION_COUNT}\n\n", "center")
-    main_output_text_box.update()
-    root.after(TIME_DELAY_6_SECONDS)
-    for index, item in enumerate(selected_pcb, start=1):
-        message_good = f"PCB {pcb_number_dic[item]}:\nSocket 1. Test Result: PASS\nSocket 2. Test Result: PASS\n\n"
-        GPIO.output(socket1_good, GPIO.LOW)
-        GPIO.output(socket2_good, GPIO.LOW)
-        main_output_text_box.insert(tk.END, f"{message_good}")
-        main_output_text_box.update()
-        root.after(TIME_DELAY_6_SECONDS)
-        GPIO.output(socket1_good, GPIO.HIGH)  # Control the Channel 1
-        GPIO.output(socket2_good, GPIO.HIGH)  # Control the Channel 6
-    message = f"\n------------------------------------------------------------------------------------\n" \
-              f" -                     Test {TEST_COMPLETION_COUNT} Has been completed                          - " \
-              f"\n------------------------------------------------------------------------------------\n\n"
-    del selected_pcb[:]
-    main_output_text_box.insert(tk.END, message, "center")
-    root.after(1000)
-    main_output_text_box.update()
-    status_display(f"Test {TEST_COMPLETION_COUNT}\ncompleted")
-    status_output_text_box.update()
-    m = threading.Thread(target=signal_start)
-    m.start()
+        self.test_completion_count += 1
+        random.shuffle(self.TEST_SOCKET_1)
+        random.shuffle(self.TEST_SOCKET_2)
+        self.main_output_text_box.insert(tk.END, f"Test Number: {self.test_completion_count}\n\n", "center")
+        self.main_output_text_box.update()
 
+        pcb_to_test = self.selected_pcb_name_list.pop(0)
 
-def start_all_bad():
-    global TEST_COMPLETION_COUNT
-    pcb_number_dic = {"PCB 1": 1, "PCB 2": 2, "PCB 3": 3, "PCB 4": 4}
-    TEST_COMPLETION_COUNT += 1
-    selected_pcb = checked_boxes()
-    main_output_text_box.insert(tk.END, f"Current Test Number: {TEST_COMPLETION_COUNT}\n\n", "center")
-    root.after(TIME_DELAY_6_SECONDS)
-    for index, item in enumerate(selected_pcb, start=1):
-        message_failed = f"PCB {pcb_number_dic[item]}:\nSocket 1. Test Result: Failed\nSocket 2 Test Result: Failed\n\n"
-        GPIO.output(socket1_bad, GPIO.LOW)
-        GPIO.output(socket2_bad, GPIO.LOW)
-        main_output_text_box.insert(tk.END, f"{message_failed}")
-        main_output_text_box.update()
-        root.after(TIME_DELAY_6_SECONDS)
-        GPIO.output(socket1_bad, GPIO.HIGH)  # Control the Channel 1
-        GPIO.output(socket2_bad, GPIO.HIGH)  # Control the Channel 6
-    message = f"\n------------------------Test {TEST_COMPLETION_COUNT} Has been completed----------------------\n\n"
-    del selected_pcb[:]
-    main_output_text_box.insert(tk.END, message, "center")
-    root.after(1000)
-    main_output_text_box.update()
+        pin_one = self.TEST_SOCKET_1[random.randint(0, 3)]
+        pin_two = self.TEST_SOCKET_2[random.randint(0, 3)]
+        GPIO.output(pin_one, GPIO.LOW)
+        GPIO.output(pin_two, GPIO.LOW)
+        self.main_output_text_box.insert(tk.END, f"{pcb_to_test}:\nSocket 1 Test: {self.names[pin_one]}\n")
+        self.main_output_text_box.insert(tk.END, f"Socket 2 Test: {self.names[pin_two]}\n\n")
+        self.main_output_text_box.update()
+        self.root.after(self.TIME_DELAY_2_SECONDS)
+        GPIO.output(pin_one, GPIO.HIGH)
+        GPIO.output(pin_two, GPIO.HIGH)
+        self.root.after(self.TIME_DELAY_2_SECONDS)
 
-
-def start_all_retest():
-    global TEST_COMPLETION_COUNT
-    pcb_number_dic = {"PCB 1": 1, "PCB 2": 2, "PCB 3": 3, "PCB 4": 4}
-    TEST_COMPLETION_COUNT += 1
-    selected_pcb = checked_boxes()
-    main_output_text_box.insert(tk.END, f"Current Test Number: {TEST_COMPLETION_COUNT}\n\n", "center")
-    root.after(TIME_DELAY_6_SECONDS)
-    for index, item in enumerate(selected_pcb, start=1):
-        message_retest = f"PCB {pcb_number_dic[item]}:\nSocket 1. Test Result: Retest\nSocket 2 Test Result: Retest\n\n"
-        print(f"Setting GPIO pin {names[socket1_retest]} to value GPIO.LOW")  # Control the Channel 1
-        GPIO.output(socket1_retest, GPIO.LOW)
-        GPIO.output(socket2_retest, GPIO.LOW)
-        main_output_text_box.insert(tk.END, f"{message_retest}")
-        main_output_text_box.update()
-        root.after(TIME_DELAY_6_SECONDS)
-        GPIO.output(socket1_retest, GPIO.HIGH)  # Control the Channel 1
-        GPIO.output(socket2_retest, GPIO.HIGH)  # Control the Channel 6
-    message = f"\n------------------------------------------------------------------------------------\n" \
-              f" -                     Test {TEST_COMPLETION_COUNT} Has been completed                          - " \
-              f"\n------------------------------------------------------------------------------------\n\n"
-    del selected_pcb[:]
-    main_output_text_box.insert(tk.END, message, "center")
-    root.after(1000, status_display(f"Select PCB\nto\nStart Test"))
-    main_output_text_box.update()
-
-
-def start_all_recover():
-    global TEST_COMPLETION_COUNT
-    pcb_number_dic = {"PCB 1": 1, "PCB 2": 2, "PCB 3": 3, "PCB 4": 4}
-    TEST_COMPLETION_COUNT += 1
-    selected_pcb = checked_boxes()
-    main_output_text_box.insert(tk.END, f"Current Test Number: {TEST_COMPLETION_COUNT}\n\n", "center")
-    root.after(TIME_DELAY_6_SECONDS)
-    for index, item in enumerate(selected_pcb, start=1):
-        message_recover = f"PCB {pcb_number_dic[item]}:\nSocket 1.Test Result:Recover\nSocket 2 Test Result:Recover\n\n"
-        GPIO.output(socket1_recover, GPIO.LOW)
-        GPIO.output(socket2_recover, GPIO.LOW)
-        main_output_text_box.insert(tk.END, f"{message_recover}")
-        main_output_text_box.update()
-        root.after(TIME_DELAY_6_SECONDS)
-        GPIO.output(socket1_recover, GPIO.HIGH)  # Control the Channel 1
-        GPIO.output(socket2_recover, GPIO.HIGH)  # Control the Channel 6
-    message = f"\n------------------------------------------------------------------------------------\n" \
-              f" -                     Test {TEST_COMPLETION_COUNT} Has been completed                 - " \
-              f"\n------------------------------------------------------------------------------------\n\n"
-    del selected_pcb[:]
-    main_output_text_box.insert(tk.END, message, "center")
-    root.after(1000)
-    main_output_text_box.update()
-
-
-def random_signals():
-    # Randomly selects: good, bad, retest, recover and sends IO signal to selected channel
-    global TEST_SOCKET_1
-    global TEST_SOCKET_2
-    global TEST_COMPLETION_COUNT
-    TEST_COMPLETION_COUNT += 1
-    try:
-        while True:
-            random.shuffle(TEST_SOCKET_1)  # Shuffle PCB_1_list & PCB_2_list
-            random.shuffle(TEST_SOCKET_2)
-            main_output_text_box.insert(tk.END, f"Current Test Number: {TEST_COMPLETION_COUNT}\n\n", "center")
-            # PCB 1
-            pin_one = TEST_SOCKET_1[random.randint(0, 3)]  # pick and random index from list #1
-            pin_two = TEST_SOCKET_2[random.randint(0, 3)]  # pick and random number from list #2
-            print(f"Setting GPIO pin pin_one to value GPIO.LOW")  # ON
-            print(f"Setting GPIO pin pin_two to value GPIO.LOW")  # ON
-            main_output_text_box.insert(tk.END, f"PCB 1:\nSocket 1. Test Result: {names[pin_one]}\n")
-            main_output_text_box.insert(tk.END, f"Socket 2. Test Result: {names[pin_two]}\n\n")
-            root.after(TIME_DELAY_6_SECONDS)  # random time 10 seconds
-            print(f"Setting GPIO pin pin_two to value GPIO.HIGH")  # OFF
-            print(f"Setting GPIO pin pin_one to value GPIO.HIGH")  # OFF
+        if not self.selected_pcb_name_list:
             message = f"\n------------------------------------------------------------------------------------\n" \
-                      f" -                     Test {TEST_COMPLETION_COUNT} Has been completed                 - " \
+                      f"                      Test {self.test_completion_count} Has been completed                    " \
                       f"\n------------------------------------------------------------------------------------\n\n"
-            main_output_text_box.insert(tk.END, message, "center")
-            root.after(1000)
-            main_output_text_box.update()
+            self.main_output_text_box.insert(tk.END, message, "center")
+            self.main_output_text_box.update()
+            self.status_display(f"Test {self.test_completion_count}\ncompleted")
+            self.start_button.config(state=tk.NORMAL)
+            self.stop_button.config(state=tk.DISABLED)
+            self.running = False
+        else:
+            self.start_automate_handshake_thread()
 
-            break
-    finally:
-        print(f"Random test {TEST_COMPLETION_COUNT}")
+    def run_manual_test(self, test_type):
+        if self.running:
+            messagebox.showwarning("Warning!", "A test is already in progress.")
+            return
 
+        selected_pcbs = self.get_checked_pcbs()
+        if not selected_pcbs:
+            messagebox.showwarning("Warning!", "Must select at least one PCB")
+            return
 
-def destroy():
-    root.destroy()
+        self.running = True
+        self.start_button.config(state=tk.DISABLED)
+        self.stop_button.config(state=tk.NORMAL)
 
+        self.test_completion_count += 1
+        self.main_output_text_box.insert(tk.END, f"Current Test Number: {self.test_completion_count}\n\n", "center")
+        self.main_output_text_box.update()
+        self.root.after(self.TIME_DELAY_2_SECONDS)
 
-#####################################################################################################################
-# -------------------------------------------TKINTER GUI STARTS HERE------------------------------------------------#
-#####################################################################################################################
+        for pcb_name in selected_pcbs:
+            if not self.running:
+                break
+            socket1_pin, socket2_pin, result_text = self.get_test_pins_and_text(test_type)
 
-ROOT_COLOR = "#080202"
-BOX_COLOR = "#EEEEEE"
-PCB_BUTTON_COLOR = "#176B87"
-root = tk.Tk()  # Create the GUI window
-root.title("IC Tester.")
-root.config(bg=ROOT_COLOR)
-root.geometry("780x830")
+            GPIO.output(socket1_pin, GPIO.LOW)
+            GPIO.output(socket2_pin, GPIO.LOW)
 
-# create a main title label
-title_label = tk.Label(root, text="ASIC Simulator V-2.5", font=("SimSun", 32, "bold"), bg=ROOT_COLOR, fg="white")
-title_label.place(x=150, y=45)
+            message = f"{pcb_name}:\nSocket 1. Test Result: {result_text}\nSocket 2. Test Result: {result_text}\n\n"
+            self.main_output_text_box.insert(tk.END, message)
+            self.main_output_text_box.update()
 
-#####################################################################################################################
-# -------------------------------------------PCB BOX SELECTOR------------------------------------------------#
-#####################################################################################################################
-outer_frame = tk.Frame(root, bg='#EEEEEE')
-outer_frame.place(x=100, y=150, width=170, height=270)
-# Create an inner frame with the desired background color and place it inside the outer frame
-inner_frame = tk.Frame(outer_frame, bg='#176B87', bd=2, relief='solid')
-inner_frame.place(x=2, y=2, width=166, height=266)  # 2 pixels smaller on each side
+            self.root.after(self.TIME_DELAY_2_SECONDS)
 
-PCB_checkbox_label = tk.Label(inner_frame, text="Select PCB\n&\nStart Handshake", font=("SimSun", 11, "bold"),
-                              bg='#176B87', fg="white")
-PCB_checkbox_label.place(x=12, y=2)
+            GPIO.output(socket1_pin, GPIO.HIGH)
+            GPIO.output(socket2_pin, GPIO.HIGH)
 
-#####################################################################################################################
-# -------------------------------------------MIDDLE BOX DISPLAY------------------------------------------------#
-#####################################################################################################################
+        message = f"\n------------------------------------------------------------------------------------\n" \
+                  f" -                     Test {self.test_completion_count} Has been completed                          - " \
+                  f"\n------------------------------------------------------------------------------------\n\n"
+        self.main_output_text_box.insert(tk.END, message, "center")
+        self.main_output_text_box.update()
+        self.status_display(f"Test {self.test_completion_count}\ncompleted")
+        self.start_button.config(state=tk.NORMAL)
+        self.stop_button.config(state=tk.DISABLED)
+        self.running = False
 
-
-outer_frame_3 = tk.Frame(root, bg='#EEEEEE')
-outer_frame_3.place(x=300, y=150, width=170, height=270)
-# Create an inner frame with the desired background color and place it inside the outer frame
-inner_frame_3 = tk.Frame(outer_frame_3, bg='#176B87', bd=2, relief='solid')
-inner_frame_3.place(x=2, y=2, width=166, height=266)  # 2 pixels smaller on each side
-
-status_title_label = tk.Label(inner_frame_3, text="Current Test\nStatus", font=("SimSun", 11, "bold"),
-                              bg='#176B87', fg="white")
-status_title_label.place(x=25, y=3)
-
-#####################################################################################################################
-# -------------------------------------------RIGHT BOX PRESSER------------------------------------------------#
-#####################################################################################################################
-
-outer_frame_2 = tk.Frame(root, bg='#EEEEEE')
-outer_frame_2.place(x=500, y=150, width=170, height=270)
-# Create an inner frame with the desired background color and place it inside the outer frame
-inner_frame_2 = tk.Frame(outer_frame_2, bg='#176B87', bd=2, relief='solid')
-inner_frame_2.place(x=2, y=2, width=166, height=266)  # 2 pixels smaller on each side
-
-MANUAL_BUTTONS_label = tk.Label(inner_frame_2, text="Manual\nTesting", font=("SimSun", 11, "bold"),
-                                bg='#176B87', fg="white")
-MANUAL_BUTTONS_label.place(x=45, y=3)
+    def get_test_pins_and_text(self, test_type):
+        if test_type == "good":
+            return self.socket1_good, self.socket2_good, "PASS"
+        elif test_type == "bad":
+            return self.socket1_bad, self.socket2_bad, "Failed"
+        elif test_type == "retest":
+            return self.socket1_retest, self.socket2_retest, "Retest"
+        elif test_type == "recover":
+            return self.socket1_recover, self.socket2_recover, "Recover"
+        elif test_type == "random":
+            pin1 = self.TEST_SOCKET_1[random.randint(0, 3)]
+            pin2 = self.TEST_SOCKET_2[random.randint(0, 3)]
+            return pin1, pin2, f"{self.names[pin1]}/{self.names[pin2]}"
 
 
-######################################################################################################################
+    def start_signal_thread(self):
+        threading.Thread(target=self.signal_start, daemon=True).start()
 
-def signal_start_threading():
-    t = threading.Thread(target=signal_start)
-    t.start()
+    def start_automate_handshake_thread(self):
+        threading.Thread(target=self.automate_handshake, daemon=True).start()
+
+    def run_manual_test_thread(self, test_type):
+        threading.Thread(target=self.run_manual_test, args=(test_type,), daemon=True).start()
+
+    def stop_test(self):
+        self.running = False
+        self.start_button.config(state=tk.NORMAL)
+        self.stop_button.config(state=tk.DISABLED)
+        self.status_display("Test\nStopped")
+
+    def save_log(self):
+        log_content = self.main_output_text_box.get(1.0, tk.END)
+        if not log_content.strip():
+            messagebox.showwarning("Warning!", "Log is empty.")
+            return
+
+        file_path = tk.filedialog.asksaveasfilename(defaultextension=".txt", filetypes=[("Text files", "*.txt"), ("All files", "*.*")])
+        if file_path:
+            with open(file_path, "w") as f:
+                f.write(log_content)
+            messagebox.showinfo("Success", "Log saved successfully.")
+
+    def destroy(self):
+        GPIO.cleanup()
+        self.root.destroy()
 
 
-def automate_handshake_threading():
-    t = threading.Thread(target=automate_handshake)
-    t.start()
-
-
-def all_good_loop():
-    a = threading.Thread(target=start_all_good)
-    a.start()
-
-
-######################################################################################################################
-# Create a button widget
-button_pass = tk.Button(inner_frame_2, text="All Passed", width=10, height=1, command=all_good_loop, bg="green")
-button_fail = tk.Button(inner_frame_2, text="All Failed", width=10, height=1, command=start_all_bad, bg="red")
-button_retest = tk.Button(inner_frame_2, text="Retest All", width=10, height=1, command=start_all_retest, bg="#79AC78")
-button_recover = tk.Button(inner_frame_2, text="Recover All", width=10, height=1, command=start_all_recover,
-                           bg="#FF9B50")
-button_random = tk.Button(inner_frame_2, text="Randomize", width=10, height=1, command=random_signals, bg="#F8FF95")
-
-button_exit = tk.Button(root, text="Exit", width=14, height=2, command=destroy, bg="gray")
-
-button_pass.place(x=80, y=70, anchor=tk.CENTER)
-button_fail.place(x=80, y=110, anchor=tk.CENTER)
-button_retest.place(x=80, y=150, anchor=tk.CENTER)
-button_recover.place(x=80, y=190, anchor=tk.CENTER)
-button_random.place(x=80, y=230, anchor=tk.CENTER)
-button_exit.place(x=620, y=795, anchor=tk.CENTER)
-
-pcb1 = tk.BooleanVar(value=False)
-pcb2 = tk.BooleanVar(value=False)
-pcb3 = tk.BooleanVar(value=False)
-pcb4 = tk.BooleanVar(value=False)
-
-check_box1 = tk.Checkbutton(inner_frame, text="PCB 1", width=8, height=2, variable=pcb1, bg=PCB_BUTTON_COLOR)
-check_box2 = tk.Checkbutton(inner_frame, text="PCB 2", width=8, height=2, variable=pcb2, bg=PCB_BUTTON_COLOR)
-check_box3 = tk.Checkbutton(inner_frame, text="PCB 3", width=8, height=2, variable=pcb3, bg=PCB_BUTTON_COLOR)
-check_box4 = tk.Checkbutton(inner_frame, text="PCB 4", width=8, height=2, variable=pcb4, bg=PCB_BUTTON_COLOR)
-
-check_box1.place(x=35, y=60)
-check_box2.place(x=35, y=90)
-check_box3.place(x=35, y=120)
-check_box4.place(x=35, y=150)
-
-start_loop = tk.Button(inner_frame, text="Start Loop", width=16, height=2, command=signal_start, bg="#64CCC5")
-start_loop.place(x=80, y=220, anchor=tk.CENTER)
-
-main_output_text_box = scrolledtext.ScrolledText(root, padx=10, background=BOX_COLOR, font=("arial", 14, "bold"),
-                                                 height=14,
-                                                 width=50, borderwidth=2, relief=tk.SOLID)
-main_output_text_box.tag_configure('center', justify='center')
-main_output_text_box.place(x=80, y=455)
-
-status_output_text_box = scrolledtext.ScrolledText(root, background=BOX_COLOR, font=("arial", 14, "bold"), height=6,
-                                                   width=11, borderwidth=2, relief=tk.SOLID)
-status_output_text_box.tag_configure('center', justify='center', foreground="red")
-status_output_text_box.place(x=312, y=240)
-
-root.after(1000, status_display(f"Select PCB\nto\nStart Test"))
-
-root.mainloop()
+if __name__ == "__main__":
+    root = tk.Tk()
+    app = AsicSimulator(root)
+    root.mainloop()
